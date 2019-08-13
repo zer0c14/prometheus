@@ -15,6 +15,7 @@ package chunkenc
 
 import (
 	"fmt"
+	"math"
 	"sync"
 
 	"github.com/pkg/errors"
@@ -56,11 +57,20 @@ type Appender interface {
 	Append(int64, float64)
 }
 
-// Iterator is a simple iterator that can only get the next value.
+// Iterator iterates over the data of a time series.
 type Iterator interface {
+	// Seek advances the iterator forward to the sample with the timestamp t or first value after t.
+	// If the current iterator points to the sample with timestamp after t already, Seek has no effect.
+	// Seek returns false if there is no such sample with the timestamp equal or larger than t.
+	// Iterator can be exhausted when the Seek returns false.
+	Seek(t int64) bool
+	// At returns the current timestamp/value pair.
+	// At returns (math.MinInt64, 0.0) before the iterator has advanced.
 	At() (int64, float64)
-	Err() error
+	// Next advances the iterator by one.
 	Next() bool
+	// Err returns the current error.
+	Err() error
 }
 
 // NewNopIterator returns a new chunk iterator that does not hold any data.
@@ -70,7 +80,8 @@ func NewNopIterator() Iterator {
 
 type nopIterator struct{}
 
-func (nopIterator) At() (int64, float64) { return 0, 0 }
+func (nopIterator) Seek(t int64) bool    { return false }
+func (nopIterator) At() (int64, float64) { return math.MinInt64, 0 }
 func (nopIterator) Next() bool           { return false }
 func (nopIterator) Err() error           { return nil }
 

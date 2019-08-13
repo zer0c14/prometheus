@@ -1617,6 +1617,8 @@ func newMemSeries(lset labels.Labels, id uint64, chunkRange int64) *memSeries {
 		ref:        id,
 		chunkRange: chunkRange,
 		nextAt:     math.MinInt64,
+		// This is to make sure iterator.At without advancing returns default values.
+		sampleBuf:  [4]sample{{math.MinInt64, 0}, {math.MinInt64, 0}, {math.MinInt64, 0}, {math.MinInt64, 0}},
 	}
 	return s
 }
@@ -1672,7 +1674,8 @@ func (s *memSeries) reset() {
 	s.headChunk = nil
 	s.firstChunkID = 0
 	s.nextAt = math.MinInt64
-	s.sampleBuf = [4]sample{}
+	// This is to make sure iterator.At without advancing returns default values.
+	s.sampleBuf = [4]sample{{math.MinInt64, 0}, {math.MinInt64, 0}, {math.MinInt64, 0}, {math.MinInt64, 0}}
 	s.pendingCommit = false
 	s.app = nil
 }

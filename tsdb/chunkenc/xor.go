@@ -115,6 +115,7 @@ func (c *XORChunk) iterator(it Iterator) *xorIterator {
 		// We skip that for actual samples.
 		br:       newBReader(c.b.bytes()[2:]),
 		numTotal: binary.BigEndian.Uint16(c.b.bytes()),
+		t:        math.MinInt64,
 	}
 }
 
@@ -239,6 +240,19 @@ type xorIterator struct {
 
 	tDelta uint64
 	err    error
+}
+
+func (it *xorIterator) Seek(t int64) bool {
+	if it.err != nil {
+		return false
+	}
+
+	for t > it.t || it.numRead == 0 {
+		if !it.Next() {
+			return false
+		}
+	}
+	return true
 }
 
 func (it *xorIterator) At() (int64, float64) {
