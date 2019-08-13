@@ -15,6 +15,7 @@ package tsdb
 
 import (
 	"fmt"
+	"github.com/prometheus/prometheus/pkg/value"
 	"math"
 	"runtime"
 	"sort"
@@ -850,19 +851,12 @@ func (h *Head) appender() *headAppender {
 		head: h,
 		// Set the minimum valid time to whichever is greater the head min valid time or the compaciton window.
 		// This ensures that no samples will be added within the compaction window to avoid races.
-		minValidTime: max(atomic.LoadInt64(&h.minValidTime), h.MaxTime()-h.chunkRange/2),
+		minValidTime: value.MaxInt64(atomic.LoadInt64(&h.minValidTime), h.MaxTime()-h.chunkRange/2),
 		mint:         math.MaxInt64,
 		maxt:         math.MinInt64,
 		samples:      h.getAppendBuffer(),
 		sampleSeries: h.getSeriesBuffer(),
 	}
-}
-
-func max(a, b int64) int64 {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 func (h *Head) getAppendBuffer() []record.RefSample {

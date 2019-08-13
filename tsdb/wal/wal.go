@@ -18,6 +18,7 @@ import (
 	"bufio"
 	"encoding/binary"
 	"fmt"
+	"github.com/prometheus/prometheus/pkg/value"
 	"hash/crc32"
 	"io"
 	"os"
@@ -625,7 +626,7 @@ func (w *WAL) log(rec []byte, final bool) error {
 
 		// Find how much of the record we can fit into the page.
 		var (
-			l    = min(len(rec), (pageSize-p.alloc)-recordHeaderSize)
+			l    = value.MinInt64(int64(len(rec)), int64((pageSize-p.alloc)-recordHeaderSize))
 			part = rec[:l]
 			buf  = p.buf[p.alloc:]
 			typ  recType
