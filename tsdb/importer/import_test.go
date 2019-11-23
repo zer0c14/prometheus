@@ -30,6 +30,7 @@ import (
 	"github.com/prometheus/prometheus/util/testutil"
 )
 
+// We use a lower value for this than the default to test block compaction implicitly.
 const maxSamplesInMemory = 2000
 
 func testBlocks(t *testing.T, blocks []tsdb.BlockReader, metricLabels []string, expectedMint, expectedMaxt int64, expectedSamples []tsdb.MetricSample, expectedSymbols []string, expectedNumBlocks int) {
@@ -592,4 +593,70 @@ func TestImportIntoExistingDB(t *testing.T) {
 		_ = os.RemoveAll(tmpFile2.Name())
 		_ = os.RemoveAll(tmpDbDir)
 	}
+}
+
+// Test to see if multiple series are imported correctly.
+// Developed to test the streaming capabilities.
+func TestMixedSeries(t *testing.T) {
+	partialOMText := func(metricName, metricType string, series []tsdb.MetricSample) string {
+		str := fmt.Sprintf("# HELP %s This is a metric\n# TYPE %s %s", metricName, metricName, metricType)
+		for _, s := range series {
+			str += fmt.Sprintf("\n%s%s %f %d", metricName, s.Labels.String(), s.Value, s.TimestampMs)
+		}
+		return str
+	}
+	metricA := "metricA"
+	metricLabels := []string{"foo", "bar"}
+	mint, maxt := int64(0), int64(1000)
+	step := 5
+	seriesA := genSeries(metricLabels, mint, maxt, step)
+	omTextA := partialOMText(metricA, "gauge", seriesA)
+	metricB := "metricB"
+	seriesB := genSeries(metricLabels, mint, maxt, step)
+	omTextB := partialOMText(metricB, "gauge", seriesB)
+	omText1 := fmt.Sprintf("%s\n%s\n# EOF", omTextA, omTextB)
+
+	tmpDbDir, err := ioutil.TempDir("", "importer")
+	testutil.Ok(t, err)
+	tmpFile2, err := ioutil.TempFile("", "iff")
+	testutil.Ok(t, err)
+	_, err = tmpFile2.WriteString(omText1)
+	testutil.Ok(t, err)
+	err = ImportFromFile(tmpFile2.Name(), tmpDbDir, maxSamplesInMemory, nil)
+	testutil.Ok(t, err)
+
+	addMetricLabel := func(series []tsdb.MetricSample, metricName string) []tsdb.MetricSample {
+		augSamples := make([]tsdb.MetricSample, 0)
+		for _, sample := range series {
+			lbls := labels2.FromStrings("__name__", metricName)
+			s := tsdb.MetricSample{
+				TimestampMs: sample.TimestampMs,
+				Value:       sample.Value,
+				Labels:      append(lbls, sample.Labels...),
+			}
+			augSamples = append(augSamples, s)
+		}
+		return augSamples
+	}
+
+	expectedSamples := append(addMetricLabel(seriesA, metricA), addMetricLabel(seriesB, metricB)...)
+	expectedSymbols := append([]string{"__name__", metricA, metricB}, metricLabels...)
+
+	db, err := tsdb.Open(tmpDbDir, nil, nil, &tsdb.Options{
+		BlockRanges:            tsdb.DefaultOptions.BlockRanges,
+		RetentionDuration:      tsdb.DefaultOptions.RetentionDuration,
+		AllowOverlappingBlocks: true,
+	})
+	testutil.Ok(t, err)
+
+	blocks := make([]tsdb.BlockReader, 0)
+	for _, b := range db.Blocks() {
+		blocks = append(blocks, b)
+	}
+
+	testBlocks(t, blocks, metricLabels, mint, maxt-int64(step-1), expectedSamples, expectedSymbols, 1)
+
+	_ = tmpFile2.Close()
+	_ = os.RemoveAll(tmpFile2.Name())
+	_ = os.RemoveAll(tmpDbDir)
 }
