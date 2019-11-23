@@ -93,26 +93,22 @@ func ImportFromFile(filePath string, dbPath string, maxSamplesInMemory int, logg
 	if err != nil {
 		return err
 	}
+	defer f.Close()
 
 	sampleIndexes, blockMetas, err := collectSampleInformation(f, dbMint, dbMaxt, blockTimes, logger)
 	if err != nil {
 		return err
 	}
 
-	err = f.Close()
+	// Set reader to starting point to allow another pass.
+	_, err = f.Seek(0, io.SeekStart)
 	if err != nil {
 		return err
 	}
-
-	f2, err := os.Open(filePath)
-	if err != nil {
-		return err
-	}
-	defer f2.Close()
 
 	expandedBlockMetas := expandBlockMetas(blockMetas)
 
-	err = writeSamples(f2, tmpDbDir, sampleIndexes, expandedBlockMetas, maxSamplesInMemory, logger)
+	err = writeSamples(f, tmpDbDir, sampleIndexes, expandedBlockMetas, maxSamplesInMemory, logger)
 	if err != nil {
 		return err
 	}
