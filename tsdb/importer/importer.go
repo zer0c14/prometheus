@@ -241,6 +241,7 @@ func writeSamples(f *os.File, dbDir string, indexes []int, metas map[int][]*newB
 	sampleCount := 0
 	currentPassCount := 0
 
+	encBuf := new(bytes.Buffer)
 	streamSamples := func(data []byte, atEOF bool) (int, []byte, error) {
 		var err error
 		advance := 0
@@ -284,7 +285,7 @@ func writeSamples(f *os.File, dbDir string, indexes []int, metas map[int][]*newB
 					Labels:      labels.FromMap(clabels.Map()),
 				}
 
-				encBuf := new(bytes.Buffer)
+				encBuf.Reset()
 				enc := gob.NewEncoder(encBuf)
 				err = enc.Encode(sample)
 				if err != nil {
