@@ -204,15 +204,13 @@ func writeSamples(f *os.File, dbDir string, dbMint, dbMaxt int64, blockMetas map
 		blockIndex := -1
 		if len(blockMetas) == 1 || sample.Timestamp < dbMint {
 			blockIndex = 0
+		} else if sample.Timestamp >= dbMaxt {
+			blockIndex = len(blockMetas) - 1
 		} else {
-			if sample.Timestamp >= dbMaxt {
-				blockIndex = len(blockMetas) - 1
-			} else {
-				for blockIdx, meta := range blockMetas {
-					if meta.mint <= sample.Timestamp && sample.Timestamp < meta.maxt {
-						blockIndex = blockIdx
-						break
-					}
+			for blockIdx, meta := range blockMetas {
+				if meta.mint <= sample.Timestamp && sample.Timestamp < meta.maxt {
+					blockIndex = blockIdx
+					break
 				}
 			}
 		}
@@ -402,10 +400,9 @@ func binBlocks(blocks []newBlockMeta, duration int64) [][]newBlockMeta {
 			start = block.maxt
 			continue
 		}
-		if block.mint-start < duration {
-			if block.maxt-start < duration {
-				bin = append(bin, block)
-			}
+		if block.mint-start < duration && block.maxt-start < duration {
+			bin = append(bin, block)
+
 		} else {
 			bins = append(bins, bin)
 			bin = []newBlockMeta{block}
@@ -464,14 +461,38 @@ func constructBlockMetadata(dbMint, dbMaxt int64, blockTimes []blockTimestampPai
 	blockMetas := make(map[int]*newBlockMeta)
 	if len(blockTimes) == 0 {
 		// If no blocks are found, then just create one block.
-		blockMetas[0] = &newBlockMeta{index: 0, count: 0, mint: math.MaxInt64, maxt: dbMint, isAligned: false}
+		blockMetas[0] = &newBlockMeta{
+			index:     0,
+			count:     0,
+			mint:      math.MaxInt64,
+			maxt:      dbMint,
+			isAligned: false,
+		}
 	} else {
 		// We have at least 2 block metas - before dbMint, and after dbMaxt.
-		blockMetas[0] = &newBlockMeta{index: 0, count: 0, mint: math.MaxInt64, maxt: dbMint, isAligned: false}
-		for idx, block := range blockTimes {
-			blockMetas[idx+1] = &newBlockMeta{index: idx + 1, count: 0, mint: block.start, maxt: block.end, isAligned: true}
+		blockMetas[0] = &newBlockMeta{
+			index:     0,
+			count:     0,
+			mint:      math.MaxInt64,
+			maxt:      dbMint,
+			isAligned: false,
 		}
-		blockMetas[len(blockTimes)+1] = &newBlockMeta{index: len(blockTimes) + 1, count: 0, mint: dbMaxt, maxt: math.MinInt64, isAligned: false}
+		for idx, block := range blockTimes {
+			blockMetas[idx+1] = &newBlockMeta{
+				index:     idx + 1,
+				count:     0,
+				mint:      block.start,
+				maxt:      block.end,
+				isAligned: true,
+			}
+		}
+		blockMetas[len(blockTimes)+1] = &newBlockMeta{
+			index:     len(blockTimes) + 1,
+			count:     0,
+			mint:      dbMaxt,
+			maxt:      math.MinInt64,
+			isAligned: false,
+		}
 	}
 	return blockMetas
 }
