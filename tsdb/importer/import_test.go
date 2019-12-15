@@ -19,15 +19,13 @@ import (
 	"github.com/prometheus/prometheus/pkg/value"
 	"github.com/prometheus/prometheus/tsdb"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
+	"github.com/prometheus/prometheus/util/testutil"
 	"io/ioutil"
 	"math"
 	"math/rand"
 	"os"
 	"sort"
 	"testing"
-	"time"
-
-	"github.com/prometheus/prometheus/util/testutil"
 )
 
 // We use a lower value for this than the default to test block compaction implicitly.
@@ -138,14 +136,6 @@ func readSeries(block tsdb.BlockReader, lbls labels2.Labels) ([]tsdb.MetricSampl
 		}
 	}
 	return series, nil
-}
-
-func shuffle(x []tsdb.MetricSample) {
-	r := rand.New(rand.NewSource(time.Now().Unix()))
-	for n := len(x); n > 0; n-- {
-		randIdx := r.Intn(n)
-		x[n-1], x[randIdx] = x[randIdx], x[n-1]
-	}
 }
 
 // genSeries generates series from mint to maxt, with a step value.
