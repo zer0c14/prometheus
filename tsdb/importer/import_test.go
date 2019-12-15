@@ -70,7 +70,7 @@ func testBlocks(t *testing.T, blocks []tsdb.BlockReader, metricLabels []string, 
 	sortSamples(allSamples)
 	sortSamples(expectedSamples)
 	// Assert that all samples that we imported + what existed already are present.
-	testutil.Assert(t, len(allSamples) == len(expectedSamples), "number of expected sample is different from actual samples")
+	testutil.Assert(t, len(allSamples) == len(expectedSamples), "number of expected samples is different from actual samples")
 	testutil.Equals(t, expectedSamples, allSamples, "actual samples are different from expected samples")
 
 	// Assert that DB's time ranges are as specified.
@@ -82,8 +82,8 @@ func sortSamples(samples []tsdb.MetricSample) {
 	sort.Slice(samples, func(x, y int) bool {
 		sx, sy := samples[x], samples[y]
 		// If timestamps are equal, sort based on values.
-		if sx.TimestampMs != sy.TimestampMs {
-			return sx.TimestampMs < sy.TimestampMs
+		if sx.Timestamp != sy.Timestamp {
+			return sx.Timestamp < sy.Timestamp
 		} else {
 			return sx.Value < sy.Value
 		}
@@ -128,9 +128,9 @@ func readSeries(block tsdb.BlockReader, lbls labels2.Labels) ([]tsdb.MetricSampl
 				for chunkIter.Next() {
 					t, v := chunkIter.At()
 					sample := tsdb.MetricSample{
-						TimestampMs: t,
-						Value:       v,
-						Labels:      actLabels,
+						Timestamp: t,
+						Value:     v,
+						Labels:    actLabels,
 					}
 					series = append(series, sample)
 				}
@@ -154,7 +154,7 @@ func genSeries(labels []string, mint, maxt int64, step int) []tsdb.MetricSample 
 	for idx := mint; idx < maxt; idx += int64(step) {
 		// Round to 3 places.
 		val := math.Floor(rand.Float64()*1000) / 1000
-		sample := tsdb.MetricSample{TimestampMs: idx, Value: val, Labels: labels2.FromStrings(labels...)}
+		sample := tsdb.MetricSample{Timestamp: idx, Value: val, Labels: labels2.FromStrings(labels...)}
 		series = append(series, sample)
 	}
 	return series
@@ -164,7 +164,7 @@ func genSeries(labels []string, mint, maxt int64, step int) []tsdb.MetricSample 
 func genOpenMetricsText(metricName, metricType string, series []tsdb.MetricSample) string {
 	str := fmt.Sprintf("# HELP %s This is a metric\n# TYPE %s %s", metricName, metricName, metricType)
 	for _, s := range series {
-		str += fmt.Sprintf("\n%s%s %f %d", metricName, s.Labels.String(), s.Value, s.TimestampMs)
+		str += fmt.Sprintf("\n%s%s %f %d", metricName, s.Labels.String(), s.Value, s.Timestamp)
 	}
 	str += fmt.Sprintf("\n# EOF")
 	return str
@@ -209,14 +209,14 @@ http_requests_total{code="400"} 1 1565133713990
 				Symbols:   []string{"__name__", "http_requests_total", "code", "200", "400"},
 				Samples: []tsdb.MetricSample{
 					{
-						TimestampMs: 1565133713989,
-						Value:       1021,
-						Labels:      labels2.FromStrings("__name__", "http_requests_total", "code", "200"),
+						Timestamp: 1565133713989,
+						Value:     1021,
+						Labels:    labels2.FromStrings("__name__", "http_requests_total", "code", "200"),
 					},
 					{
-						TimestampMs: 1565133713990,
-						Value:       1,
-						Labels:      labels2.FromStrings("__name__", "http_requests_total", "code", "400"),
+						Timestamp: 1565133713990,
+						Value:     1,
+						Labels:    labels2.FromStrings("__name__", "http_requests_total", "code", "400"),
 					},
 				},
 			},
@@ -243,14 +243,14 @@ http_requests_total{code="400"} 2 1575133713990
 				Symbols:   []string{"http_requests_total", "code", "200", "400", "__name__"},
 				Samples: []tsdb.MetricSample{
 					{
-						TimestampMs: 1565133713989,
-						Value:       1022,
-						Labels:      labels2.FromStrings("__name__", "http_requests_total", "code", "200"),
+						Timestamp: 1565133713989,
+						Value:     1022,
+						Labels:    labels2.FromStrings("__name__", "http_requests_total", "code", "200"),
 					},
 					{
-						TimestampMs: 1575133713990,
-						Value:       2,
-						Labels:      labels2.FromStrings("__name__", "http_requests_total", "code", "400"),
+						Timestamp: 1575133713990,
+						Value:     2,
+						Labels:    labels2.FromStrings("__name__", "http_requests_total", "code", "400"),
 					},
 				},
 			},
@@ -277,14 +277,14 @@ http_requests_total{code="400"} 3 1395066363000
 				Symbols:   []string{"http_requests_total", "code", "200", "400", "__name__"},
 				Samples: []tsdb.MetricSample{
 					{
-						TimestampMs: 1395066363000,
-						Value:       1023,
-						Labels:      labels2.FromStrings("__name__", "http_requests_total", "code", "200"),
+						Timestamp: 1395066363000,
+						Value:     1023,
+						Labels:    labels2.FromStrings("__name__", "http_requests_total", "code", "200"),
 					},
 					{
-						TimestampMs: 1395066363000,
-						Value:       3,
-						Labels:      labels2.FromStrings("__name__", "http_requests_total", "code", "400"),
+						Timestamp: 1395066363000,
+						Value:     3,
+						Labels:    labels2.FromStrings("__name__", "http_requests_total", "code", "400"),
 					},
 				},
 			},
@@ -327,9 +327,9 @@ no_type_metric{type="bad_news_bears"} 0.0 111
 				Symbols:   []string{"no_type_metric", "type", "bad_news_bears", "__name__"},
 				Samples: []tsdb.MetricSample{
 					{
-						TimestampMs: 111,
-						Value:       0.0,
-						Labels:      labels2.FromStrings("__name__", "no_type_metric", "type", "bad_news_bears"),
+						Timestamp: 111,
+						Value:     0.0,
+						Labels:    labels2.FromStrings("__name__", "no_type_metric", "type", "bad_news_bears"),
 					},
 				},
 			},
@@ -369,9 +369,9 @@ bad_ts{type="bad_timestamp"} 420 1e99
 				Symbols:   []string{"no_help_no_type", "foo", "bar", "__name__"},
 				Samples: []tsdb.MetricSample{
 					{
-						TimestampMs: 6900,
-						Value:       42,
-						Labels:      labels2.FromStrings("__name__", "no_help_no_type", "foo", "bar"),
+						Timestamp: 6900,
+						Value:     42,
+						Labels:    labels2.FromStrings("__name__", "no_help_no_type", "foo", "bar"),
 					},
 				},
 			},
@@ -395,9 +395,9 @@ bad_ts{type="bad_timestamp"} 420 1e99
 				Symbols:   []string{"bare_metric", "__name__"},
 				Samples: []tsdb.MetricSample{
 					{
-						TimestampMs: 1001,
-						Value:       42.24,
-						Labels:      labels2.FromStrings("__name__", "bare_metric"),
+						Timestamp: 1001,
+						Value:     42.24,
+						Labels:    labels2.FromStrings("__name__", "bare_metric"),
 					},
 				},
 			},
@@ -507,7 +507,7 @@ func TestImportIntoExistingDB(t *testing.T) {
 			GeneratorStep:     5000,
 			DBMint:            1000,
 			DBMaxt:            tsdb.DefaultBlockDuration * 3,
-			ImportShuffle:     true,
+			ImportShuffle:     false,
 			ImportMint:        0,
 			ImportMaxt:        tsdb.DefaultBlockDuration * 5,
 			ExpectedSymbols:   []string{"__name__", "test_metric_3", "foo", "bar"},
@@ -547,9 +547,6 @@ func TestImportIntoExistingDB(t *testing.T) {
 		testutil.Ok(t, err)
 
 		importSeries := genSeries(test.MetricLabels, test.ImportMint, test.ImportMaxt, test.GeneratorStep)
-		if test.ImportShuffle {
-			shuffle(importSeries)
-		}
 		importText := genOpenMetricsText(test.MetricName, test.MetricType, importSeries)
 
 		tmpFile2, err := ioutil.TempFile("", "iff")
@@ -564,9 +561,9 @@ func TestImportIntoExistingDB(t *testing.T) {
 			for _, sample := range exp {
 				lbls := labels2.FromStrings("__name__", test.MetricName)
 				s := tsdb.MetricSample{
-					TimestampMs: sample.TimestampMs,
-					Value:       sample.Value,
-					Labels:      append(lbls, sample.Labels...),
+					Timestamp: sample.Timestamp,
+					Value:     sample.Value,
+					Labels:    append(lbls, sample.Labels...),
 				}
 				expectedSamples = append(expectedSamples, s)
 			}
@@ -601,7 +598,7 @@ func TestMixedSeries(t *testing.T) {
 	partialOMText := func(metricName, metricType string, series []tsdb.MetricSample) string {
 		str := fmt.Sprintf("# HELP %s This is a metric\n# TYPE %s %s", metricName, metricName, metricType)
 		for _, s := range series {
-			str += fmt.Sprintf("\n%s%s %f %d", metricName, s.Labels.String(), s.Value, s.TimestampMs)
+			str += fmt.Sprintf("\n%s%s %f %d", metricName, s.Labels.String(), s.Value, s.Timestamp)
 		}
 		return str
 	}
@@ -630,9 +627,9 @@ func TestMixedSeries(t *testing.T) {
 		for _, sample := range series {
 			lbls := labels2.FromStrings("__name__", metricName)
 			s := tsdb.MetricSample{
-				TimestampMs: sample.TimestampMs,
-				Value:       sample.Value,
-				Labels:      append(lbls, sample.Labels...),
+				Timestamp: sample.Timestamp,
+				Value:     sample.Value,
+				Labels:    append(lbls, sample.Labels...),
 			}
 			augSamples = append(augSamples, s)
 		}

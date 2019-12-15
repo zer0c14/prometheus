@@ -17,9 +17,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/binary"
 	"encoding/gob"
 	"github.com/go-kit/kit/log"
+	"github.com/go-kit/kit/log/level"
 	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/prometheus/prometheus/pkg/textparse"
 	"github.com/prometheus/prometheus/pkg/value"
@@ -30,7 +30,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -63,12 +62,13 @@ type newBlockMeta struct {
 	count      int
 	mint, maxt int64
 	isAligned  bool
-	dirs       []string
+	dir        string
+	children   []newBlockMeta
 }
 
 // Content Type for the Open Metrics Parser.
 // Needed to init the text parser.
-const contentType = "application/openmetrics-text; version=0.0.1; charset=utf-8"
+const contentType = "application/openmetrics-text;"
 
 // ImportFromFile imports data from a file formatted according to the Open Metrics format,
 // converts it into block(s), and places the newly created block(s) in the
@@ -78,12 +78,14 @@ func ImportFromFile(filePath string, dbPath string, maxSamplesInMemory int, logg
 		logger = log.NewNopLogger()
 	}
 
+	level.Debug(logger).Log("msg", "creating temp directory")
 	tmpDbDir, err := ioutil.TempDir("", "importer")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(tmpDbDir)
 
+	level.Debug(logger).Log("msg", "reading existing block metadata to infer time ranges")
 	dbMint, dbMaxt, blockTimes, err := getDbTimes(dbPath)
 	if err != nil {
 		return err
@@ -95,145 +97,31 @@ func ImportFromFile(filePath string, dbPath string, maxSamplesInMemory int, logg
 	}
 	defer f.Close()
 
-	sampleIndexes, blockMetas, err := collectSampleInformation(f, dbMint, dbMaxt, blockTimes, logger)
-	if err != nil {
+	level.Debug(logger).Log("msg", "creating new block skeletons based on existing blocks")
+	blockMetas := constructBlockMetadata(dbMint, dbMaxt, blockTimes)
+
+	level.Info(logger).Log("msg", "importing input data and aligning with existing DB")
+	if err = writeSamples(f, tmpDbDir, dbMint, dbMaxt, blockMetas, maxSamplesInMemory, logger); err != nil {
 		return err
 	}
 
-	// Set reader to starting point to allow another pass.
-	_, err = f.Seek(0, io.SeekStart)
-	if err != nil {
+	level.Info(logger).Log("msg", "merging fully overlapping blocks")
+	if err = mergeBlocks(tmpDbDir, blockMetas, logger); err != nil {
 		return err
 	}
 
-	expandedBlockMetas := expandBlockMetas(blockMetas)
-
-	err = writeSamples(f, tmpDbDir, sampleIndexes, expandedBlockMetas, maxSamplesInMemory, logger)
-	if err != nil {
-		return err
-	}
-
-	// Compact blocks created by us, that share the same time range.
-	for _, metas := range expandedBlockMetas {
-		for _, meta := range metas {
-			if len(meta.dirs) > 1 {
-				compactedPath, err := compactBlocks(tmpDbDir, meta.dirs, logger)
-				if err != nil {
-					return err
-				}
-				// Delete blocks after compaction.
-				for _, dir := range meta.dirs {
-					err = os.RemoveAll(dir)
-					if err != nil {
-						return err
-					}
-				}
-				meta.dirs = []string{compactedPath}
-			}
-		}
-	}
-
-	err = fileutil.CopyDirs(tmpDbDir, dbPath)
-	if err != nil {
+	level.Debug(logger).Log("msg", "copying newly created blocks from temp location to actual DB location")
+	if err = fileutil.CopyDirs(tmpDbDir, dbPath); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-// collectSampleInformation reads every sample, assigns each of them to a block, and collects per-block
-// information required for the actual write stage.
-func collectSampleInformation(f *os.File, dbMint, dbMaxt int64, blockTimes []blockTimestampPair, logger log.Logger) ([]int, map[int]*newBlockMeta, error) {
-	blockIndexes := make([]int, 0)
-	blockMetas := make(map[int]*newBlockMeta)
-
-	// We have at least 2 block metas - before dbMint, and after dbMaxt.
-	blockMetas[0] = &newBlockMeta{index: 0, count: 0, mint: math.MaxInt64, maxt: dbMint, isAligned: false}
-	for idx, block := range blockTimes {
-		blockMetas[idx+1] = &newBlockMeta{index: idx + 1, count: 0, mint: block.start, maxt: block.end, isAligned: true}
-	}
-	blockMetas[len(blockTimes)+1] = &newBlockMeta{index: len(blockTimes) + 1, count: 0, mint: dbMaxt, maxt: math.MinInt64, isAligned: false}
-
-	// Fetch timestamps only.
-	streamTimes := func(data []byte, atEOF bool) (int, []byte, error) {
-		var err error
-		advance := 0
-		lineIndex := 0
-		lines := strings.Split(string(data), "\n")
-		parser := textparse.New(data, contentType)
-		for {
-			var entry textparse.Entry
-			if entry, err = parser.Next(); err != nil {
-				if !atEOF && entry == textparse.EntryInvalid {
-					return 0, nil, nil
-				}
-				if err == io.EOF {
-					err = nil
-				}
-				return 0, nil, err
-			}
-			// Add 1 to account for newline.
-			lineLength := len(lines[lineIndex]) + 1
-			lineIndex++
-			if entry != textparse.EntrySeries {
-				advance = advance + lineLength
-				continue
-			}
-			_, ctime, _ := parser.Series()
-			if ctime == nil {
-				return 0, nil, NoTimestampError
-			} else {
-				// OpenMetrics parser multiples times by 1000 - undoing that.
-				ctimeCorrected := *ctime / 1000
-				ctimeBuf := make([]byte, binary.MaxVarintLen64)
-				n := binary.PutVarint(ctimeBuf, ctimeCorrected)
-				advance += lineLength
-				return advance, ctimeBuf[:n], nil
-			}
-		}
-	}
-
-	// Use a streaming approach to avoid loading too much data at once.
-	scanner := bufio.NewScanner(f)
-	scanner.Split(streamTimes)
-	for scanner.Scan() {
-		ctimeBytes := scanner.Bytes()
-		ctime, _ := binary.Varint(ctimeBytes)
-
-		var sampleBlockIndex int
-		if ctime < dbMint || len(blockTimes) == 0 {
-			sampleBlockIndex = 0
-		} else if ctime >= dbMaxt {
-			sampleBlockIndex = len(blockTimes) + 1
-		} else {
-			sampleBlockIndex = getBlockIndex(ctime, blockTimes)
-			if sampleBlockIndex == -1 {
-				return blockIndexes, blockMetas, NoBlockFoundError
-			}
-			// Adjusting for block before dbMint.
-			sampleBlockIndex = sampleBlockIndex + 1
-		}
-		meta, ok := blockMetas[sampleBlockIndex]
-		if !ok {
-			return blockIndexes, blockMetas, NoBlockMetaFoundError
-		}
-		meta.mint = value.MinInt64(meta.mint, ctime)
-		meta.maxt = value.MaxInt64(meta.maxt, ctime)
-		meta.count += 1
-		blockIndexes = append(blockIndexes, sampleBlockIndex)
-	}
-
-	if err := scanner.Err(); err != nil {
-		return blockIndexes, blockMetas, err
-	}
-
-	return blockIndexes, blockMetas, nil
-}
-
 // writeSamples parses each metric sample, and writes the samples to the correspondingly aligned block.
 // It uses the block indexes assigned to each sample, and block meta info, gathered in collectSampleInformation().
-func writeSamples(f *os.File, dbDir string, indexes []int, metas map[int][]*newBlockMeta, maxSamplesInMemory int, logger log.Logger) error {
-	blocks := getEmptyBlocks(len(metas))
+func writeSamples(f *os.File, dbDir string, dbMint, dbMaxt int64, blockMetas map[int]*newBlockMeta, maxSamplesInMemory int, logger log.Logger) error {
+	blocks := getEmptyBlocks(len(blockMetas))
 	sampleCount := 0
 	currentPassCount := 0
 
@@ -276,9 +164,9 @@ func writeSamples(f *os.File, dbDir string, indexes []int, metas map[int][]*newB
 				_ = parser.Metric(&clabels)
 
 				sample := tsdb.MetricSample{
-					TimestampMs: ctimeCorrected,
-					Value:       cvalue,
-					Labels:      labels.FromMap(clabels.Map()),
+					Timestamp: ctimeCorrected,
+					Value:     cvalue,
+					Labels:    labels.FromMap(clabels.Map()),
 				}
 
 				encBuf.Reset()
@@ -299,9 +187,8 @@ func writeSamples(f *os.File, dbDir string, indexes []int, metas map[int][]*newB
 	scanner.Split(streamSamples)
 
 	for scanner.Scan() {
-		// TODO (dipack95): Check to see if we can use something like sync.Pool to reuse mem.
 		if currentPassCount == 0 {
-			blocks = getEmptyBlocks(len(metas))
+			blocks = getEmptyBlocks(len(blockMetas))
 		}
 
 		encSample := scanner.Bytes()
@@ -309,47 +196,89 @@ func writeSamples(f *os.File, dbDir string, indexes []int, metas map[int][]*newB
 		sample := tsdb.MetricSample{}
 		err := gob.NewDecoder(decBuf).Decode(&sample)
 		if err != nil {
+			level.Error(logger).Log("msg", "failed to decode current entry returned by file scanner", "err", err)
 			return err
 		}
 
-		blockIndex := indexes[sampleCount]
+		// Find what block does this sample belong to.
+		blockIndex := -1
+		if len(blockMetas) == 1 || sample.Timestamp < dbMint {
+			blockIndex = 0
+		} else {
+			if sample.Timestamp >= dbMaxt {
+				blockIndex = len(blockMetas) - 1
+			} else {
+				for blockIdx, meta := range blockMetas {
+					if meta.mint <= sample.Timestamp && sample.Timestamp < meta.maxt {
+						blockIndex = blockIdx
+						break
+					}
+				}
+			}
+		}
+
+		meta, ok := blockMetas[blockIndex]
+		if !ok {
+			return NoBlockMetaFoundError
+		}
+		meta.mint = value.MinInt64(meta.mint, sample.Timestamp)
+		meta.maxt = value.MaxInt64(meta.maxt, sample.Timestamp)
+		meta.count += 1
+
 		blocks[blockIndex] = append(blocks[blockIndex], &sample)
 
 		currentPassCount += 1
 		sampleCount += 1
 		// Have enough samples to write to disk.
-		if currentPassCount == maxSamplesInMemory || sampleCount == len(indexes) {
-			for blockIdx, block := range blocks {
-				// If current block is empty, nothing to write.
-				if len(block) == 0 {
-					continue
-				}
-				// Sort input data.
-				sort.Slice(block, func(x, y int) bool {
-					return block[x].TimestampMs < block[y].TimestampMs
-				})
-				// Put each sample into the appropriate block.
-				bins := binSamples(block, metas[blockIdx])
-				for midx, meta := range metas[blockIdx] {
-					bmint, bmaxt := meta.mint, meta.maxt
-					binned := bins[midx]
-					if len(binned) == 0 {
-						continue
-					}
-					path, err := tsdb.CreateBlock(binned, dbDir, bmint, bmaxt, logger)
-					if err != nil {
-						return err
-					}
-					meta.dirs = append(meta.dirs, path)
-				}
+		if currentPassCount == maxSamplesInMemory {
+			if err = flushBlocks(dbDir, blocks, blockMetas, logger); err != nil {
+				return err
 			}
 			// Reset current pass count.
 			currentPassCount = 0
 		}
 	}
 
+	// Flush any remaining samples.
+	if err := flushBlocks(dbDir, blocks, blockMetas, logger); err != nil {
+		return err
+	}
+
 	if err := scanner.Err(); err != nil {
 		return err
+	}
+	return nil
+}
+
+// flushBlocks writes the given blocks of samples to disk, and updates block metadata information.
+func flushBlocks(dbDir string, blocksToFlush [][]*tsdb.MetricSample, blockMetas map[int]*newBlockMeta, logger log.Logger) error {
+	for blockIdx, block := range blocksToFlush {
+		// If current block is empty, nothing to write.
+		if len(block) == 0 {
+			continue
+		}
+		meta := blockMetas[blockIdx]
+		// Put each sample into the appropriate block.
+		bins, binTimes := binSamples(block, meta, tsdb.DefaultBlockDuration)
+		for binIdx, bin := range bins {
+			if len(bin) == 0 {
+				continue
+			}
+			start, end := binTimes[binIdx].start, binTimes[binIdx].end
+			path, err := tsdb.CreateBlock(bin, dbDir, start, end, logger)
+			if err != nil {
+				return err
+			}
+			child := newBlockMeta{
+				index:     blockIdx,
+				count:     0,
+				mint:      start,
+				maxt:      end,
+				isAligned: meta.isAligned,
+				dir:       path,
+			}
+			meta.children = append(meta.children, child)
+		}
 	}
 	return nil
 }
@@ -391,14 +320,45 @@ func getEmptyBlocks(num int) [][]*tsdb.MetricSample {
 	return blocks
 }
 
-// getBlockIndex returns the index of the block that the timestamp belongs to.
-func getBlockIndex(t int64, blockTimes []blockTimestampPair) int {
-	for idx, block := range blockTimes {
-		if block.start <= t && t < block.end {
-			return idx
+// mergeBlocks looks for blocks that have overlapping time intervals, and compacts them.
+func mergeBlocks(dbDir string, blockMetas map[int]*newBlockMeta, logger log.Logger) error {
+	for _, blockMeta := range blockMetas {
+		if blockMeta.isAligned {
+			dirs := make([]string, 0)
+			for _, meta := range blockMeta.children {
+				dirs = append(dirs, meta.dir)
+			}
+			path, err := compactBlocks(dbDir, dirs, logger)
+			if err != nil {
+				return err
+			}
+			blockMeta.dir = path
+		} else {
+			binned := binBlocks(blockMeta.children, tsdb.DefaultBlockDuration)
+			for _, bin := range binned {
+				if len(bin) <= 1 {
+					continue
+				}
+				dirs := make([]string, 0)
+				for _, meta := range bin {
+					dirs = append(dirs, meta.dir)
+				}
+				path, err := compactBlocks(dbDir, dirs, logger)
+				if err != nil {
+					return err
+				}
+				for _, dir := range dirs {
+					if err = os.RemoveAll(dir); err != nil {
+						return err
+					}
+				}
+				for _, meta := range bin {
+					meta.dir = path
+				}
+			}
 		}
 	}
-	return -1
+	return nil
 }
 
 // compactBlocks compacts the block dirs and places them in dest.
@@ -415,51 +375,105 @@ func compactBlocks(dest string, dirs []string, logger log.Logger) (string, error
 	return filepath.Join(dest, ulid.String()), nil
 }
 
-// binSamples puts each sample into its corresponding block specified by the block metadatas.
-func binSamples(samples []*tsdb.MetricSample, metas []*newBlockMeta) [][]*tsdb.MetricSample {
-	bins := getEmptyBlocks(len(metas))
-	for _, sample := range samples {
-		idx := -1
-		for midx, m := range metas {
-			if idx != -1 {
-				continue
-			}
-			if m.mint <= sample.TimestampMs && sample.TimestampMs < m.maxt {
-				idx = midx
-			}
-		}
-		bins[idx] = append(bins[idx], sample)
+// binBlocks groups blocks that have fully intersecting intervals of the given duration.
+// Input blocks are assumed sorted by time.
+func binBlocks(blocks []newBlockMeta, duration int64) [][]newBlockMeta {
+	bins := make([][]newBlockMeta, 0)
+	if len(blocks) == 0 {
+		return bins
 	}
+
+	bin := make([]newBlockMeta, 0)
+
+	var start int64
+	for blockIdx, block := range blocks {
+		if blockIdx == 0 {
+			start = block.mint
+		}
+		if block.maxt-block.mint >= duration {
+			if block.mint <= start {
+				bin = append(bin, block)
+				bins = append(bins, bin)
+			} else {
+				bins = append(bins, bin)
+				bins = append(bins, []newBlockMeta{block})
+			}
+			bin = []newBlockMeta{}
+			start = block.maxt
+			continue
+		}
+		if block.mint-start < duration {
+			if block.maxt-start < duration {
+				bin = append(bin, block)
+			}
+		} else {
+			bins = append(bins, bin)
+			bin = []newBlockMeta{block}
+			start = block.mint
+		}
+	}
+	bins = append(bins, bin)
 	return bins
 }
 
-// expandBlockMetas creates a list of block metas for each block we've found so far.
-// This includes dividing blocks outside of DB time limits into 2h blocks.
-func expandBlockMetas(blockMetas map[int]*newBlockMeta) map[int][]*newBlockMeta {
-	expandedBlockMetas := make(map[int][]*newBlockMeta)
-	for blockIdx, meta := range blockMetas {
-		bmetas := make([]*newBlockMeta, 0)
-		if blockIdx == 0 || blockIdx == len(blockMetas)-1 {
-			// Divvy blocks outside of DB time limits into 2h blocks.
-			twoHourBlocks := makeRange(meta.mint, meta.maxt, tsdb.DefaultBlockDuration)
-			for _, block := range twoHourBlocks {
-				m := &newBlockMeta{
-					index:     blockIdx,
-					count:     0,
-					mint:      block.start,
-					maxt:      block.end,
-					isAligned: false,
-					dirs:      nil,
-				}
-				bmetas = append(bmetas, m)
+// binSamples divvies the samples into bins corresponding to the given block.
+// If an aligned block is given to it, then a single bin is created,
+// else, it divides the samples into blocks of duration.
+// It returns the binned samples, and the time limits for each bin.
+func binSamples(samples []*tsdb.MetricSample, meta *newBlockMeta, duration int64) ([][]*tsdb.MetricSample, []blockTimestampPair) {
+	findBlock := func(ts int64, blocks []blockTimestampPair) int {
+		for idx, block := range blocks {
+			if block.start <= ts && ts < block.end {
+				return idx
 			}
-		} else {
-			// Blocks that need to be aligned are kept as is.
-			bmetas = append(bmetas, meta)
 		}
-		expandedBlockMetas[blockIdx] = bmetas
+		return -1
 	}
-	return expandedBlockMetas
+	bins := make([][]*tsdb.MetricSample, 0)
+	times := make([]blockTimestampPair, 0)
+	if len(samples) == 0 {
+		return bins, times
+	}
+	if meta.isAligned {
+		bins = append(bins, samples)
+		times = []blockTimestampPair{{start: meta.mint, end: meta.maxt}}
+	} else {
+		timeTranches := makeRange(meta.mint, meta.maxt, duration)
+		bins = getEmptyBlocks(len(timeTranches))
+		binIdx := -1
+		for _, sample := range samples {
+			ts := sample.Timestamp
+			if binIdx == -1 {
+				binIdx = findBlock(ts, timeTranches)
+			}
+			block := timeTranches[binIdx]
+			if block.start <= ts && ts < block.end {
+				bins[binIdx] = append(bins[binIdx], sample)
+			} else {
+				binIdx = findBlock(ts, timeTranches)
+				bins[binIdx] = append(bins[binIdx], sample)
+			}
+		}
+		times = timeTranches
+	}
+	return bins, times
+}
+
+// constructBlockMetadata gives us the new blocks' metadatas.
+func constructBlockMetadata(dbMint, dbMaxt int64, blockTimes []blockTimestampPair) map[int]*newBlockMeta {
+	blockMetas := make(map[int]*newBlockMeta)
+	if len(blockTimes) == 0 {
+		// If no blocks are found, then just create one block.
+		blockMetas[0] = &newBlockMeta{index: 0, count: 0, mint: math.MaxInt64, maxt: dbMint, isAligned: false}
+	} else {
+		// We have at least 2 block metas - before dbMint, and after dbMaxt.
+		blockMetas[0] = &newBlockMeta{index: 0, count: 0, mint: math.MaxInt64, maxt: dbMint, isAligned: false}
+		for idx, block := range blockTimes {
+			blockMetas[idx+1] = &newBlockMeta{index: idx + 1, count: 0, mint: block.start, maxt: block.end, isAligned: true}
+		}
+		blockMetas[len(blockTimes)+1] = &newBlockMeta{index: len(blockTimes) + 1, count: 0, mint: dbMaxt, maxt: math.MinInt64, isAligned: false}
+	}
+	return blockMetas
 }
 
 // getDbTimes returns the DB's min, max timestamps, and each individual blocks'
