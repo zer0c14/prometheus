@@ -120,7 +120,7 @@ func ImportFromFile(filePath string, dbPath string, maxSamplesInMemory int, logg
 
 // writeSamples parses each metric sample, and writes the samples to the correspondingly aligned block.
 // It uses the block indexes assigned to each sample, and block meta info, gathered in collectSampleInformation().
-func writeSamples(f *os.File, dbDir string, dbMint, dbMaxt int64, blockMetas map[int]*newBlockMeta, maxSamplesInMemory int, logger log.Logger) error {
+func writeSamples(f *os.File, dbDir string, dbMint, dbMaxt int64, blockMetas []*newBlockMeta, maxSamplesInMemory int, logger log.Logger) error {
 	blocks := getEmptyBlocks(len(blockMetas))
 	sampleCount := 0
 	currentPassCount := 0
@@ -214,10 +214,10 @@ func writeSamples(f *os.File, dbDir string, dbMint, dbMaxt int64, blockMetas map
 			}
 		}
 
-		meta, ok := blockMetas[blockIndex]
-		if !ok {
+		if blockIndex < 0 || blockIndex >= len(blockMetas) {
 			return NoBlockMetaFoundError
 		}
+		meta := blockMetas[blockIndex]
 		meta.mint = value.MinInt64(meta.mint, sample.Timestamp)
 		meta.maxt = value.MaxInt64(meta.maxt, sample.Timestamp)
 		meta.count += 1
@@ -248,7 +248,7 @@ func writeSamples(f *os.File, dbDir string, dbMint, dbMaxt int64, blockMetas map
 }
 
 // flushBlocks writes the given blocks of samples to disk, and updates block metadata information.
-func flushBlocks(dbDir string, blocksToFlush [][]*tsdb.MetricSample, blockMetas map[int]*newBlockMeta, logger log.Logger) error {
+func flushBlocks(dbDir string, blocksToFlush [][]*tsdb.MetricSample, blockMetas []*newBlockMeta, logger log.Logger) error {
 	for blockIdx, block := range blocksToFlush {
 		// If current block is empty, nothing to write.
 		if len(block) == 0 {
@@ -320,7 +320,7 @@ func getEmptyBlocks(num int) [][]*tsdb.MetricSample {
 }
 
 // mergeBlocks looks for blocks that have overlapping time intervals, and compacts them.
-func mergeBlocks(dbDir string, blockMetas map[int]*newBlockMeta, logger log.Logger) error {
+func mergeBlocks(dbDir string, blockMetas []*newBlockMeta, logger log.Logger) error {
 	for _, blockMeta := range blockMetas {
 		// If no children, there's nothing to merge.
 		if len(blockMeta.children) == 0 {
@@ -462,42 +462,42 @@ func binSamples(samples []*tsdb.MetricSample, meta *newBlockMeta, duration int64
 }
 
 // constructBlockMetadata gives us the new blocks' metadatas.
-func constructBlockMetadata(dbMint, dbMaxt int64, blockTimes []blockTimestampPair) map[int]*newBlockMeta {
-	blockMetas := make(map[int]*newBlockMeta)
+func constructBlockMetadata(dbMint, dbMaxt int64, blockTimes []blockTimestampPair) []*newBlockMeta {
+	blockMetas := make([]*newBlockMeta, 0)
 	if len(blockTimes) == 0 {
 		// If no blocks are found, then just create one block.
-		blockMetas[0] = &newBlockMeta{
+		blockMetas = append(blockMetas, &newBlockMeta{
 			index:     0,
 			count:     0,
 			mint:      math.MaxInt64,
 			maxt:      dbMint,
 			isAligned: false,
-		}
+		})
 	} else {
 		// We have at least 2 block metas - before dbMint, and after dbMaxt.
-		blockMetas[0] = &newBlockMeta{
+		blockMetas = append(blockMetas, &newBlockMeta{
 			index:     0,
 			count:     0,
 			mint:      math.MaxInt64,
 			maxt:      dbMint,
 			isAligned: false,
-		}
+		})
 		for idx, block := range blockTimes {
-			blockMetas[idx+1] = &newBlockMeta{
+			blockMetas = append(blockMetas, &newBlockMeta{
 				index:     idx + 1,
 				count:     0,
 				mint:      block.start,
 				maxt:      block.end,
 				isAligned: true,
-			}
+			})
 		}
-		blockMetas[len(blockTimes)+1] = &newBlockMeta{
+		blockMetas = append(blockMetas, &newBlockMeta{
 			index:     len(blockTimes) + 1,
 			count:     0,
 			mint:      dbMaxt,
 			maxt:      math.MinInt64,
 			isAligned: false,
-		}
+		})
 	}
 	return blockMetas
 }
