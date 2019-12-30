@@ -521,6 +521,22 @@ func TestImportIntoExistingDB(t *testing.T) {
 			ExpectedSymbols:   []string{"__name__", "test_metric_4", "foo", "bar"},
 			ExpectedNumBlocks: 3,
 		},
+		{
+			// Import that never overlaps, after the DB max time.
+			MetricName:        "test_metric_5",
+			MetricType:        "gauge",
+			MetricLabels:      []string{"foo", "bar"},
+			GeneratorStep:     1,
+			DBMint:            0,
+			DBMaxt:            1000,
+			ImportShuffle:     false,
+			ImportMint:        tsdb.DefaultBlockDuration + 1000,
+			ImportMaxt:        tsdb.DefaultBlockDuration + 2000,
+			ExpectedMint:      0,
+			ExpectedMaxt:      tsdb.DefaultBlockDuration + 2000,
+			ExpectedSymbols:   []string{"__name__", "test_metric_5", "foo", "bar"},
+			ExpectedNumBlocks: 2,
+		},
 	}
 
 	for _, test := range tests {

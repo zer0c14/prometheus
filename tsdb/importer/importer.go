@@ -194,8 +194,7 @@ func writeSamples(f *os.File, dbDir string, dbMint, dbMaxt int64, blockMetas map
 		encSample := scanner.Bytes()
 		decBuf := bytes.NewBuffer(encSample)
 		sample := tsdb.MetricSample{}
-		err := gob.NewDecoder(decBuf).Decode(&sample)
-		if err != nil {
+		if err := gob.NewDecoder(decBuf).Decode(&sample); err != nil {
 			level.Error(logger).Log("msg", "failed to decode current entry returned by file scanner", "err", err)
 			return err
 		}
@@ -229,7 +228,7 @@ func writeSamples(f *os.File, dbDir string, dbMint, dbMaxt int64, blockMetas map
 		sampleCount += 1
 		// Have enough samples to write to disk.
 		if currentPassCount == maxSamplesInMemory {
-			if err = flushBlocks(dbDir, blocks, blockMetas, logger); err != nil {
+			if err := flushBlocks(dbDir, blocks, blockMetas, logger); err != nil {
 				return err
 			}
 			// Reset current pass count.
@@ -297,7 +296,9 @@ func makeRange(start, stop, step int64) []blockTimestampPair {
 		return r
 	}
 	for s := start; s < stop; s += step {
-		pair := blockTimestampPair{start: s}
+		pair := blockTimestampPair{
+			start: s,
+		}
 		if (s + step) >= stop {
 			pair.end = stop + 1
 		} else {
@@ -321,6 +322,10 @@ func getEmptyBlocks(num int) [][]*tsdb.MetricSample {
 // mergeBlocks looks for blocks that have overlapping time intervals, and compacts them.
 func mergeBlocks(dbDir string, blockMetas map[int]*newBlockMeta, logger log.Logger) error {
 	for _, blockMeta := range blockMetas {
+		// If no children, there's nothing to merge.
+		if len(blockMeta.children) == 0 {
+			continue
+		}
 		if blockMeta.isAligned {
 			dirs := make([]string, 0)
 			for _, meta := range blockMeta.children {
