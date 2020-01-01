@@ -70,9 +70,9 @@ func execute() (err error) {
 		dumpMinTime              = dumpCmd.Flag("min-time", "minimum timestamp to dump").Default(strconv.FormatInt(math.MinInt64, 10)).Int64()
 		dumpMaxTime              = dumpCmd.Flag("max-time", "maximum timestamp to dump").Default(strconv.FormatInt(math.MaxInt64, 10)).Int64()
 		importCmd                = cli.Command("import", "import samples from file containing information formatted in the Open Metrics format")
-		importFilePath           = importCmd.Arg("file path", "file to import samples from (must be in Open Metrics format)").String()
-		importDbPath             = importCmd.Arg("db path", "database path").String()
-		importMaxSamplesInMemory = importCmd.Arg("max-samples-in-mem", "maximum number of samples to process in a cycle").Default("10000").Int()
+		importFilePath           = importCmd.Arg("file path", "file to import samples from (must be in Open Metrics format)").Required().String()
+		importDbPath             = importCmd.Arg("db path", "database path").Required().String()
+		importMaxSamplesInMemory = importCmd.Flag("max-samples-in-mem", "maximum number of samples to process in a cycle").Default("10000").Int()
 	)
 
 	logger := log.NewLogfmtLogger(log.NewSyncWriter(os.Stderr))
