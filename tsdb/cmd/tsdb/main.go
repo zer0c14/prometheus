@@ -143,7 +143,11 @@ func execute() (err error) {
 		}()
 		return dumpSamples(db, *dumpMinTime, *dumpMaxTime)
 	case importCmd.FullCommand():
-		return importer.ImportFromFile(*importFilePath, *importDbPath, *importMaxSamplesInMemory, logger)
+		f, err := os.Open(*importFilePath)
+		if err != nil {
+			return err
+		}
+		return importer.ImportFromFile(f, *importDbPath, *importMaxSamplesInMemory, logger)
 	}
 	return nil
 }

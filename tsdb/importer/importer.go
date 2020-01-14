@@ -73,7 +73,7 @@ const contentType = "application/openmetrics-text;"
 // ImportFromFile imports data from a file formatted according to the Open Metrics format,
 // converts it into block(s), and places the newly created block(s) in the
 // TSDB DB directory, where it is treated like any other block.
-func ImportFromFile(filePath string, dbPath string, maxSamplesInMemory int, logger log.Logger) error {
+func ImportFromFile(r io.Reader, dbPath string, maxSamplesInMemory int, logger log.Logger) error {
 	if logger == nil {
 		logger = log.NewNopLogger()
 	}
@@ -91,17 +91,11 @@ func ImportFromFile(filePath string, dbPath string, maxSamplesInMemory int, logg
 		return err
 	}
 
-	f, err := os.Open(filePath)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
 	level.Debug(logger).Log("msg", "creating new block skeletons based on existing blocks")
 	blockMetas := constructBlockMetadata(dbMint, dbMaxt, blockTimes)
 
 	level.Info(logger).Log("msg", "importing input data and aligning with existing DB")
-	if err = writeSamples(f, tmpDbDir, dbMint, dbMaxt, blockMetas, maxSamplesInMemory, logger); err != nil {
+	if err = writeSamples(r, tmpDbDir, dbMint, dbMaxt, blockMetas, maxSamplesInMemory, logger); err != nil {
 		return err
 	}
 
@@ -120,71 +114,14 @@ func ImportFromFile(filePath string, dbPath string, maxSamplesInMemory int, logg
 
 // writeSamples parses each metric sample, and writes the samples to the correspondingly aligned block.
 // It uses the block indexes assigned to each sample, and block meta info, gathered in collectSampleInformation().
-func writeSamples(f *os.File, dbDir string, dbMint, dbMaxt int64, blockMetas []*newBlockMeta, maxSamplesInMemory int, logger log.Logger) error {
+func writeSamples(r io.Reader, dbDir string, dbMint, dbMaxt int64, blockMetas []*newBlockMeta, maxSamplesInMemory int, logger log.Logger) error {
 	blocks := getEmptyBlocks(len(blockMetas))
-	sampleCount := 0
 	currentPassCount := 0
 
-	encBuf := new(bytes.Buffer)
-	streamSamples := func(data []byte, atEOF bool) (int, []byte, error) {
-		var err error
-		advance := 0
-		lineIndex := 0
-		lines := strings.Split(string(data), "\n")
-		parser := textparse.New(data, contentType)
-		for {
-			var et textparse.Entry
-			if et, err = parser.Next(); err != nil {
-				if !atEOF && et == textparse.EntryInvalid {
-					return 0, nil, nil
-				}
-				if err == io.EOF {
-					err = nil
-				}
-				return 0, nil, err
-			}
-
-			// Add 1 to account for newline.
-			lineLength := len(lines[lineIndex]) + 1
-			lineIndex++
-
-			if et != textparse.EntrySeries {
-				advance = advance + lineLength
-				continue
-			}
-
-			_, ctime, cvalue := parser.Series()
-			if ctime == nil {
-				return 0, nil, NoTimestampError
-			} else {
-				// OpenMetrics parser multiples times by 1000 - undoing that.
-				ctimeCorrected := *ctime / 1000
-
-				var clabels labels.Labels
-				_ = parser.Metric(&clabels)
-
-				sample := tsdb.MetricSample{
-					Timestamp: ctimeCorrected,
-					Value:     cvalue,
-					Labels:    labels.FromMap(clabels.Map()),
-				}
-
-				encBuf.Reset()
-				enc := gob.NewEncoder(encBuf)
-				err = enc.Encode(sample)
-				if err != nil {
-					return 0, nil, err
-				}
-
-				advance += lineLength
-				return advance, encBuf.Bytes(), nil
-			}
-		}
-	}
-
 	// Use a streaming approach to avoid loading too much data at once.
-	scanner := bufio.NewScanner(f)
-	scanner.Split(streamSamples)
+	scanner := bufio.NewScanner(r)
+	buf := new(bytes.Buffer)
+	scanner.Split(sampleStreamer(buf))
 
 	for scanner.Scan() {
 		if currentPassCount == 0 {
@@ -214,7 +151,7 @@ func writeSamples(f *os.File, dbDir string, dbMint, dbMaxt int64, blockMetas []*
 			}
 		}
 
-		if blockIndex < 0 || blockIndex >= len(blockMetas) {
+		if blockIndex == -1 {
 			return NoBlockMetaFoundError
 		}
 		meta := blockMetas[blockIndex]
@@ -225,7 +162,6 @@ func writeSamples(f *os.File, dbDir string, dbMint, dbMaxt int64, blockMetas []*
 		blocks[blockIndex] = append(blocks[blockIndex], &sample)
 
 		currentPassCount += 1
-		sampleCount += 1
 		// Have enough samples to write to disk.
 		if currentPassCount == maxSamplesInMemory {
 			if err := flushBlocks(dbDir, blocks, blockMetas, logger); err != nil {
@@ -278,6 +214,66 @@ func flushBlocks(dbDir string, blocksToFlush [][]*tsdb.MetricSample, blockMetas 
 		}
 	}
 	return nil
+}
+
+// sampleStreamer returns a function that can be used to parse an OpenMetrics compliant
+// byte array, and return each token in the user-provided byte buffer.
+func sampleStreamer(buf *bytes.Buffer) func([]byte, bool) (int, []byte, error) {
+	return func(data []byte, atEOF bool) (int, []byte, error) {
+		var err error
+		advance := 0
+		lineIndex := 0
+		lines := strings.Split(string(data), "\n")
+		parser := textparse.New(data, contentType)
+		for {
+			var et textparse.Entry
+			if et, err = parser.Next(); err != nil {
+				if !atEOF && et == textparse.EntryInvalid {
+					return 0, nil, nil
+				}
+				if err == io.EOF {
+					err = nil
+				}
+				return 0, nil, err
+			}
+
+			// Add 1 to account for newline.
+			lineLength := len(lines[lineIndex]) + 1
+			lineIndex++
+
+			if et != textparse.EntrySeries {
+				advance = advance + lineLength
+				continue
+			}
+
+			_, ctime, cvalue := parser.Series()
+			if ctime == nil {
+				return 0, nil, NoTimestampError
+			} else {
+				// OpenMetrics parser multiples times by 1000 - undoing that.
+				ctimeCorrected := *ctime / 1000
+
+				var clabels labels.Labels
+				_ = parser.Metric(&clabels)
+
+				sample := tsdb.MetricSample{
+					Timestamp: ctimeCorrected,
+					Value:     cvalue,
+					Labels:    labels.FromMap(clabels.Map()),
+				}
+
+				buf.Reset()
+				enc := gob.NewEncoder(buf)
+				err = enc.Encode(sample)
+				if err != nil {
+					return 0, nil, err
+				}
+
+				advance += lineLength
+				return advance, buf.Bytes(), nil
+			}
+		}
+	}
 }
 
 // makeRange returns a series of block times between start and stop,
@@ -350,12 +346,12 @@ func mergeBlocks(dbDir string, blockMetas []*newBlockMeta, logger log.Logger) er
 				if err != nil {
 					return err
 				}
-				for _, dir := range dirs {
-					if err = os.RemoveAll(dir); err != nil {
+				for _, meta := range bin {
+					// Remove existing block directory as it is no longer needed.
+					if err = os.RemoveAll(meta.dir); err != nil {
 						return err
 					}
-				}
-				for _, meta := range bin {
+					// Update child with new block path.
 					meta.dir = path
 				}
 			}
@@ -375,7 +371,8 @@ func compactBlocks(dest string, dirs []string, logger log.Logger) (string, error
 	if err != nil {
 		return path, err
 	}
-	return filepath.Join(dest, ulid.String()), nil
+	path = filepath.Join(dest, ulid.String())
+	return path, nil
 }
 
 // binBlocks groups blocks that have fully intersecting intervals of the given duration.
@@ -393,6 +390,7 @@ func binBlocks(blocks []newBlockMeta, duration int64) [][]newBlockMeta {
 		if blockIdx == 0 {
 			start = block.mint
 		}
+		// If current block is greater than duration, then just give it it's own bin.
 		if block.maxt-block.mint >= duration {
 			if block.mint <= start {
 				bin = append(bin, block)
@@ -406,9 +404,10 @@ func binBlocks(blocks []newBlockMeta, duration int64) [][]newBlockMeta {
 			continue
 		}
 		if block.mint-start < duration && block.maxt-start < duration {
+			// If current block is within the duration window, place it in the current bin.
 			bin = append(bin, block)
-
 		} else {
+			// Else create a new block, starting with this block.
 			bins = append(bins, bin)
 			bin = []newBlockMeta{block}
 			start = block.mint

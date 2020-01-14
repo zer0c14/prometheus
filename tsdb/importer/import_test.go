@@ -25,6 +25,7 @@ import (
 	"math/rand"
 	"os"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -409,13 +410,9 @@ no_nl{type="no newline"}
 		},
 	}
 	for _, test := range tests {
-		tmpFile, err := ioutil.TempFile("", "iff")
-		testutil.Ok(t, err)
-		_, err = tmpFile.WriteString(test.ToParse)
-		testutil.Ok(t, err)
 		tmpDbDir, err := ioutil.TempDir("", "importer")
 		testutil.Ok(t, err)
-		err = ImportFromFile(tmpFile.Name(), tmpDbDir, maxSamplesInMemory, nil)
+		err = ImportFromFile(strings.NewReader(test.ToParse), tmpDbDir, maxSamplesInMemory, nil)
 		if test.IsOk {
 			testutil.Ok(t, err)
 			if len(test.Expected.Symbols) > 0 {
@@ -428,15 +425,13 @@ no_nl{type="no newline"}
 		} else {
 			testutil.NotOk(t, err)
 		}
-		_ = tmpFile.Close()
-		_ = os.RemoveAll(tmpFile.Name())
 		_ = os.RemoveAll(tmpDbDir)
 	}
 }
 
 func TestImportBadFile(t *testing.T) {
 	// No file found case.
-	err := ImportFromFile("/foo/bar/baz/buzz", "/buzz/baz/bar/foo", maxSamplesInMemory, nil)
+	err := ImportFromFile((*os.File)(nil), "/buzz/baz/bar/foo", maxSamplesInMemory, nil)
 	testutil.NotOk(t, err)
 }
 
@@ -543,23 +538,15 @@ func TestImportIntoExistingDB(t *testing.T) {
 		initSeries := genSeries(test.MetricLabels, test.DBMint, test.DBMaxt, test.GeneratorStep)
 		initText := genOpenMetricsText(test.MetricName, test.MetricType, initSeries)
 
-		tmpFile, err := ioutil.TempFile("", "iff")
-		testutil.Ok(t, err)
-		_, err = tmpFile.WriteString(initText)
-		testutil.Ok(t, err)
 		tmpDbDir, err := ioutil.TempDir("", "importer")
 		testutil.Ok(t, err)
-		err = ImportFromFile(tmpFile.Name(), tmpDbDir, maxSamplesInMemory, nil)
+		err = ImportFromFile(strings.NewReader(initText), tmpDbDir, maxSamplesInMemory, nil)
 		testutil.Ok(t, err)
 
 		importSeries := genSeries(test.MetricLabels, test.ImportMint, test.ImportMaxt, test.GeneratorStep)
 		importText := genOpenMetricsText(test.MetricName, test.MetricType, importSeries)
 
-		tmpFile2, err := ioutil.TempFile("", "iff")
-		testutil.Ok(t, err)
-		_, err = tmpFile2.WriteString(importText)
-		testutil.Ok(t, err)
-		err = ImportFromFile(tmpFile2.Name(), tmpDbDir, maxSamplesInMemory, nil)
+		err = ImportFromFile(strings.NewReader(importText), tmpDbDir, maxSamplesInMemory, nil)
 		testutil.Ok(t, err)
 
 		expectedSamples := make([]tsdb.MetricSample, 0)
@@ -590,10 +577,6 @@ func TestImportIntoExistingDB(t *testing.T) {
 
 		// Close and remove all temp files and folders.
 		_ = db.Close()
-		_ = tmpFile.Close()
-		_ = os.RemoveAll(tmpFile.Name())
-		_ = tmpFile2.Close()
-		_ = os.RemoveAll(tmpFile2.Name())
 		_ = os.RemoveAll(tmpDbDir)
 	}
 }
@@ -621,11 +604,7 @@ func TestMixedSeries(t *testing.T) {
 
 	tmpDbDir, err := ioutil.TempDir("", "importer")
 	testutil.Ok(t, err)
-	tmpFile2, err := ioutil.TempFile("", "iff")
-	testutil.Ok(t, err)
-	_, err = tmpFile2.WriteString(omText1)
-	testutil.Ok(t, err)
-	err = ImportFromFile(tmpFile2.Name(), tmpDbDir, maxSamplesInMemory, nil)
+	err = ImportFromFile(strings.NewReader(omText1), tmpDbDir, maxSamplesInMemory, nil)
 	testutil.Ok(t, err)
 
 	addMetricLabel := func(series []tsdb.MetricSample, metricName string) []tsdb.MetricSample {
@@ -659,7 +638,5 @@ func TestMixedSeries(t *testing.T) {
 
 	testBlocks(t, blocks, metricLabels, mint, maxt-int64(step-1), expectedSamples, expectedSymbols, 1)
 
-	_ = tmpFile2.Close()
-	_ = os.RemoveAll(tmpFile2.Name())
 	_ = os.RemoveAll(tmpDbDir)
 }
