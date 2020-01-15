@@ -114,8 +114,16 @@ func ImportFromFile(r io.Reader, dbPath string, maxSamplesInMemory int, logger l
 
 // writeSamples parses each metric sample, and writes the samples to the correspondingly aligned block.
 // It uses the block indexes assigned to each sample, and block meta info, gathered in collectSampleInformation().
-func writeSamples(r io.Reader, dbDir string, dbMint, dbMaxt int64, blockMetas []*newBlockMeta, maxSamplesInMemory int, logger log.Logger) error {
-	blocks := getEmptyBlocks(len(blockMetas))
+func writeSamples(r io.Reader, dbDir string, dbMint, dbMaxt int64, metas []*newBlockMeta, maxSamplesInMemory int, logger log.Logger) error {
+	blockTimes := make([]blockTimestampPair, 0)
+	for _, meta := range metas {
+		blockTimes = append(blockTimes, blockTimestampPair{
+			start: meta.mint,
+			end:   meta.maxt,
+		})
+	}
+
+	blocks := getEmptyBlocks(len(metas))
 	currentPassCount := 0
 
 	// Use a streaming approach to avoid loading too much data at once.
@@ -125,7 +133,7 @@ func writeSamples(r io.Reader, dbDir string, dbMint, dbMaxt int64, blockMetas []
 
 	for scanner.Scan() {
 		if currentPassCount == 0 {
-			blocks = getEmptyBlocks(len(blockMetas))
+			blocks = getEmptyBlocks(len(metas))
 		}
 
 		encSample := scanner.Bytes()
@@ -137,24 +145,20 @@ func writeSamples(r io.Reader, dbDir string, dbMint, dbMaxt int64, blockMetas []
 		}
 
 		// Find what block does this sample belong to.
-		blockIndex := -1
-		if len(blockMetas) == 1 || sample.Timestamp < dbMint {
+		var blockIndex int
+		if len(metas) == 1 || sample.Timestamp < dbMint {
 			blockIndex = 0
 		} else if sample.Timestamp >= dbMaxt {
-			blockIndex = len(blockMetas) - 1
+			blockIndex = len(metas) - 1
 		} else {
-			for blockIdx, meta := range blockMetas {
-				if meta.mint <= sample.Timestamp && sample.Timestamp < meta.maxt {
-					blockIndex = blockIdx
-					break
-				}
-			}
+			blockIndex = getBlockIndex(sample.Timestamp, blockTimes)
 		}
 
 		if blockIndex == -1 {
 			return NoBlockMetaFoundError
 		}
-		meta := blockMetas[blockIndex]
+
+		meta := metas[blockIndex]
 		meta.mint = value.MinInt64(meta.mint, sample.Timestamp)
 		meta.maxt = value.MaxInt64(meta.maxt, sample.Timestamp)
 		meta.count += 1
@@ -164,7 +168,7 @@ func writeSamples(r io.Reader, dbDir string, dbMint, dbMaxt int64, blockMetas []
 		currentPassCount += 1
 		// Have enough samples to write to disk.
 		if currentPassCount == maxSamplesInMemory {
-			if err := flushBlocks(dbDir, blocks, blockMetas, logger); err != nil {
+			if err := flushBlocks(dbDir, blocks, metas, logger); err != nil {
 				return err
 			}
 			// Reset current pass count.
@@ -173,7 +177,7 @@ func writeSamples(r io.Reader, dbDir string, dbMint, dbMaxt int64, blockMetas []
 	}
 
 	// Flush any remaining samples.
-	if err := flushBlocks(dbDir, blocks, blockMetas, logger); err != nil {
+	if err := flushBlocks(dbDir, blocks, metas, logger); err != nil {
 		return err
 	}
 
@@ -184,13 +188,13 @@ func writeSamples(r io.Reader, dbDir string, dbMint, dbMaxt int64, blockMetas []
 }
 
 // flushBlocks writes the given blocks of samples to disk, and updates block metadata information.
-func flushBlocks(dbDir string, blocksToFlush [][]*tsdb.MetricSample, blockMetas []*newBlockMeta, logger log.Logger) error {
-	for blockIdx, block := range blocksToFlush {
+func flushBlocks(dir string, toFlush [][]*tsdb.MetricSample, metas []*newBlockMeta, logger log.Logger) error {
+	for blockIdx, block := range toFlush {
 		// If current block is empty, nothing to write.
 		if len(block) == 0 {
 			continue
 		}
-		meta := blockMetas[blockIdx]
+		meta := metas[blockIdx]
 		// Put each sample into the appropriate block.
 		bins, binTimes := binSamples(block, meta, tsdb.DefaultBlockDuration)
 		for binIdx, bin := range bins {
@@ -198,7 +202,7 @@ func flushBlocks(dbDir string, blocksToFlush [][]*tsdb.MetricSample, blockMetas 
 				continue
 			}
 			start, end := binTimes[binIdx].start, binTimes[binIdx].end
-			path, err := tsdb.CreateBlock(bin, dbDir, start, end, logger)
+			path, err := tsdb.CreateBlock(bin, dir, start, end, logger)
 			if err != nil {
 				return err
 			}
@@ -530,4 +534,15 @@ func getDbTimes(dbPath string) (int64, int64, []blockTimestampPair, error) {
 		}
 	}
 	return mint, maxt, blockTimes, nil
+}
+
+// getBlockIndex returns the index of the block the current timestamp corresponds to.
+// User-provided times are assumed sorted in ascending order.
+func getBlockIndex(current int64, times []blockTimestampPair) int {
+	for idx, t := range times {
+		if current < t.end {
+			return idx
+		}
+	}
+	return -1
 }
